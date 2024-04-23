@@ -1,0 +1,14 @@
+functions_path: .  # path to custom functinos image_plots.py, fn_spectral_images.py, and segmentation_func.py
+input_table: input_table_test.csv  # column "filenames" with all czi images
+output_dir: ../outputs
+sn_regex: "(?<=fov_\d)"  # Regular expression used to split the sample name from the laser info in filenames from the input table
+max_shift: 500  # maximum allowed shift for registration (in pixels)
+gauss: 0  # gaussian smoothing parameter to apply, in pixels
+diff_gauss: (2, 3)  # Use difference of gaussians to enhance the image before segmentation set to "(0,)" to disable
+bg_smoothing: 5  # Gaussian blur to apply in order to select the background pixels
+n_clust_bg: 2  # Automated background selection, how many clusters to make
+top_n_clust_bg: 1  # Automated background selection, how many cluster to use as foreground
+im_inches: 2.3622  # Size of image plots in inches
+im_ft: 7  # Font used for scalebars in image plots
+dpi: 850  # Resolution to save images at in dots per inch
+cb_col: 'w'  # color of the scalebar and text

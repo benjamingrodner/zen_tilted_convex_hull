@@ -1,0 +1,196 @@
+# Snakefile
+
+"""
+Pipeline to segment hiprfish images for hsdm project
+
+"""
+
+# =============================================================================
+# Imports
+# =============================================================================
+import pandas as pd
+import numpy as np
+import os
+import sys
+import glob
+from collections import defaultdict
+import matplotlib.pyplot as plt
+import re
+import yaml
+from scipy.spatial.distance import squareform, pdist
+from sklearn.cluster import AgglomerativeClustering
+import umap
+from scipy.spatial.distance import squareform, pdist, cdist
+from sklearn.neighbors import NearestNeighbors
+import math
+
+sys.path.append(config['functions_path'])
+import fn_spectral_images as fsi
+import image_plots as ip
+import segmentation_func as sf
+
+
+# =============================================================================
+# Functions
+# =============================================================================
+
+def get_input_table():
+    input_table = pd.read_csv(config['input_table'])
+    # input_table.columns = config['input_table_cols']
+    return input_table
+
+
+def get_seg_fns(sn, fmt):
+    fns = dict_sn_fns[sn]
+    M, mtype = fsi.get_ntiles(fns[0])
+    seg_fns = []
+    for m in range(M):
+        seg_fns.append(fmt.format(sample_name=sn, scene=m))
+    return seg_fns
+
+def get_fns(fmt):
+    fns = []
+    for date, dict_sn_fns in dict_date_sn_fns.items():
+        for sn in dict_sn_fns.keys():
+            fns.append(fmt.format(date=date, sn=sn))
+    return fns
+
+def get_czi_fns(sn):
+    return dict_sn_fns[sn]
+
+# =============================================================================
+# Setup
+# =============================================================================
+
+# args = sys.argv
+# config_fn = args[args.index("--configfile") + 1]
+
+# Get czi filenames
+input_table = get_input_table()
+filenames = input_table['filenames']
+
+# Get sample names from input czi filenames
+dict_sn_fns = defaultdict(list)
+for fn in filenames:
+    bn = os.path.split(fn)[1]
+    sn, ext = re.split(config['sn_regex'], bn)
+    dict_sn_fns[sn].append(fn)
+
+### Filenames ###
+out_dir = config['output_dir'] + "/{sample_name}"
+
+# Segment
+out_dir_seg = out_dir + "/segs"
+out_dir_plot = out_dir + "/plots"
+ofmt = '/{sample_name}_scene_{scene}'
+seg_fmt = out_dir_seg + ofmt + "_seg.npy"
+props_fmt = out_dir_seg + ofmt + "_props.csv"
+plot_fmt = out_dir_plot + ofmt + "_seg_plot.png"
+rgb_fmt = out_dir_plot + ofmt + "_rgb_plot.png"
+
+
+# =============================================================================
+# Rule all output
+# =============================================================================
+
+segs_done = get_seg_fns(seg_fmt)
+
+
+# =============================================================================
+# Snake rules
+# =============================================================================
+
+rule all:
+    input:
+        segs_done
+
+
+rule segment:
+    input:
+        czi_fns = lambda wildcards: get_czi_fns(f'{wildcards.sample_name}')
+    output:
+        seg_fn = seg_fmt,
+        props_fn = props_fmt,
+        plot_fn = plot_fmt,
+        rgb_fn = rgb_fmt
+    run:
+        _, mtype = fsi.get_ntiles(input[0])
+        # Get the resolutions
+        resolutions = [fsi.get_resolution(fn) for fn in input]
+        # Get the lasers
+        lasers = [fsi.get_laser(fn) for fn in input]
+        # Sort the filenames by ascending laser wavelength
+        czi_fns = [fn for fn, l in zip(input, lasers)]
+        czi_fns = [x for _, x in sorted(zip(lasers, czi_fns))]
+        resolutions = [x for _, x in sorted(zip(lasers, resolutions))]
+        lasers = sorted(lasers)
+
+        # Get shifts
+        raws = [fsi.load_raw(fn, wildcards.scene, mtype) for fn in czi_fns]
+        raws = [fsi.reshape_aics_image(r) for r in raws]
+        # If some images have different pixel resolution, correct that
+        raws = fsi.match_resolutions_and_size(raws, resolutions)
+        image_max_norm = [fsi.max_norm(r) for r in raws]
+        sh = fsi._get_shift_vectors(image_max_norm)
+        # Now shift the raw images
+        raws_shift = fsi._shift_images(
+            raws, sh_arr[m, :, :], max_shift=config['max_shift']
+        )
+
+        # Segment
+        stack = np.dstack(raws_shift)
+        stack_sum = np.sum(stack, axis=2)
+        pre = sf.pre_process(
+            stack_sum, 
+            gauss=config['gauss'], 
+            diff_gauss=eval(config['diff_gauss'])
+            )
+        mask = sf.get_background_mask(
+            stack_sum,
+            bg_smoothing=config['bg_smoothing'],
+            n_clust_bg=config['n_clust_bg'],
+            top_n_clust_bg=config['top_n_clust_bg'],
+        )
+        seg = sf.segment(pre, mask)
+        props = sf.measure_regionprops(seg, stack_sum)
+        spec = fsi.get_cell_average_spectra(seg, stack)
+        props = props.merge(
+            pd.DataFrame(spec), left_index=True, right_index=True
+        )
+
+        # Save data
+        np.save(input.seg_fn, seg)
+        props.to_csv(input.props_fn, index=False)
+        
+        # Save segmentation plot
+        # ip.plot_image(stack_sum, cmap="inferno", im_inches=10)
+        res_mpix = resolutions[0] * 1e6
+        fig, ax, _ = ip.plot_image(
+            ip.seg2rgb(seg), 
+            im_inches=config['im_inches'],
+            ft=config['im_ft'],
+            cb_col=config['cb_col'],
+            scalebar_resolution=res_umpix
+        )
+        plt.figure(fig)
+        ip.save_fig(input.plot_fn, dpi=config['dpi'], bbox_inches=0)
+        plt.close()
+
+        # Save RGB plot
+        rgb = np.dstack([fsi.max_norm(r, type='sum') for r in raws_shift])
+        rgb = rgb[:,:,:3]
+        fig, ax, _ = ip.plot_image(
+            rgb, 
+            im_inches=config['im_inches'],
+            ft=config['im_ft'],
+            cb_col=config['cb_col'],
+            scalebar_resolution=res_umpix
+        )
+        plt.figure(fig)
+        ip.save_fig(input.rgb_fn, dpi=config['dpi'], bbox_inches=0)
+        plt.close()
+        
+
+
+
+
